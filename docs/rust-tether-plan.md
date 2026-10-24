@@ -1,6 +1,6 @@
 # Rust tether daemon
 
-Status: task 1 done. Tasks 2–8 not started.
+Status: task 2 code done, access denied. Task 1 done. Tasks 3–8 not started.
 
 The Rust daemon is a new program. It is Ammar's. The C daemon stays as the baseline. This thread orchestrates. For this session the implementer is Grok 4.7 medium, through T3 `delegate_task`, one task at a time. The child does not commit.
 
@@ -77,7 +77,7 @@ Flags: `--watch`, `--no-route`, `--no-dns`, `--static`, `--gateway`, `--netmask`
 ## Tasks
 
 1. Done. Pure `rndis`, `frame`, `dhcp`, and `arp`, with unit tests. No USB device and no `utun`. The C files stay untouched.
-2. Pending. USB open and RNDIS handshake on a phone. Print MAC and both transfer sizes. Needs the phone.
+2. Code done, access denied. USB open and RNDIS handshake on a phone. Print MAC and both transfer sizes. `cargo run --bin handshake` printed `Access denied (insufficient permissions)` and exited 3. No interface classes were readable, so the phone was not claimed.
 3. Pending. `netcfg` save and restore, tested without installing a real default route. Then a blocking one-IN one-OUT bridge started with `--no-route --no-dns`.
 4. Pending. Pools, frame ring, command queue, keepalive state machine. Stay here until a 90 second paired iperf meets the bar.
 5. Pending. Real `/1` routes and temporary DNS service. Prove rollback on SIGTERM, unplug, and a partial setup. Prove SIGKILL leaves no SystemConfiguration keys, and the next start clears leftover `/1` routes.

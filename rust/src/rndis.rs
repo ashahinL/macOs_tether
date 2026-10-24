@@ -12,6 +12,9 @@ pub const MSG_INIT: u32 = 0x0000_0002;
 pub const MSG_QUERY: u32 = 0x0000_0004;
 pub const MSG_SET: u32 = 0x0000_0005;
 pub const MSG_KEEPALIVE: u32 = 0x0000_0008;
+pub const MSG_INIT_CMPLT: u32 = 0x8000_0002;
+pub const MSG_QUERY_CMPLT: u32 = 0x8000_0004;
+pub const MSG_SET_CMPLT: u32 = 0x8000_0005;
 
 /// Fixed header of `REMOTE_NDIS_PACKET_MSG`, before the Ethernet frame.
 pub const DATA_HEADER_LEN: usize = 44;
@@ -24,6 +27,9 @@ const DATA_OFFSET: u32 = 36;
 const OID_INFO_OFFSET: u32 = 20;
 
 const OID_HEADER_LEN: usize = 28;
+const INIT_CMPLT_LEN: usize = 52;
+const QUERY_CMPLT_HEADER_LEN: usize = 24;
+const SET_CMPLT_HEADER_LEN: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RndisError {
@@ -31,6 +37,7 @@ pub enum RndisError {
     BadLength,
     BadDataOffset,
     BadType,
+    Status(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +63,18 @@ pub enum Message {
     },
     Data {
         frame: Vec<u8>,
+    },
+    InitComplete {
+        request_id: u32,
+        max_packets_per_transfer: u32,
+        max_transfer_size: u32,
+    },
+    QueryComplete {
+        request_id: u32,
+        data: Vec<u8>,
+    },
+    SetComplete {
+        request_id: u32,
     },
 }
 
@@ -192,6 +211,9 @@ fn decode(buf: &[u8], msg_type: u32) -> Result<Message, RndisError> {
                 request_id: read_u32(buf, 8),
             })
         }
+        MSG_INIT_CMPLT => parse_init_cmplt(buf),
+        MSG_QUERY_CMPLT => parse_query_cmplt(buf),
+        MSG_SET_CMPLT => parse_set_cmplt(buf),
         MSG_PACKET => {
             if msg_len < DATA_HEADER_LEN {
                 return Err(RndisError::BadLength);
@@ -206,6 +228,72 @@ fn decode(buf: &[u8], msg_type: u32) -> Result<Message, RndisError> {
         }
         _ => Err(RndisError::BadType),
     }
+}
+
+/// Slice the completion down to its declared length. A buffer shorter than
+/// `min_len`, or shorter than the length field, is an error.
+fn completion_slice(buf: &[u8], min_len: usize) -> Result<&[u8], RndisError> {
+    if buf.len() < min_len {
+        return Err(RndisError::ShortBuffer);
+    }
+    let msg_len = read_u32(buf, 4) as usize;
+    if msg_len < min_len {
+        return Err(RndisError::BadLength);
+    }
+    if msg_len > buf.len() {
+        return Err(RndisError::ShortBuffer);
+    }
+    Ok(&buf[..msg_len])
+}
+
+fn require_success(buf: &[u8]) -> Result<(), RndisError> {
+    let status = read_u32(buf, 12);
+    if status != 0 {
+        return Err(RndisError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn parse_init_cmplt(buf: &[u8]) -> Result<Message, RndisError> {
+    let msg = completion_slice(buf, INIT_CMPLT_LEN)?;
+    if read_u32(msg, 0) != MSG_INIT_CMPLT {
+        return Err(RndisError::BadType);
+    }
+    require_success(msg)?;
+    Ok(Message::InitComplete {
+        request_id: read_u32(msg, 8),
+        max_packets_per_transfer: read_u32(msg, 32),
+        max_transfer_size: read_u32(msg, 36),
+    })
+}
+
+pub fn parse_query_cmplt(buf: &[u8]) -> Result<Message, RndisError> {
+    let msg = completion_slice(buf, QUERY_CMPLT_HEADER_LEN)?;
+    if read_u32(msg, 0) != MSG_QUERY_CMPLT {
+        return Err(RndisError::BadType);
+    }
+    require_success(msg)?;
+    let data = ranged(
+        msg,
+        8,
+        read_u32(msg, 20) as usize,
+        read_u32(msg, 16) as usize,
+    )?;
+    Ok(Message::QueryComplete {
+        request_id: read_u32(msg, 8),
+        data,
+    })
+}
+
+pub fn parse_set_cmplt(buf: &[u8]) -> Result<Message, RndisError> {
+    let msg = completion_slice(buf, SET_CMPLT_HEADER_LEN)?;
+    if read_u32(msg, 0) != MSG_SET_CMPLT {
+        return Err(RndisError::BadType);
+    }
+    require_success(msg)?;
+    Ok(Message::SetComplete {
+        request_id: read_u32(msg, 8),
+    })
 }
 
 /// `rel` is an offset from `base`. The bytes must lie inside this message.
@@ -354,5 +442,105 @@ mod tests {
             unwrap_messages(&intact).unwrap(),
             vec![Message::Data { frame: small }]
         );
+    }
+
+    fn put(buf: &mut [u8], at: usize, value: u32) {
+        write_u32(buf, at, value);
+    }
+
+    #[test]
+    fn init_cmplt_reads_transfer_limits() {
+        let mut buf = vec![0u8; INIT_CMPLT_LEN];
+        put(&mut buf, 0, MSG_INIT_CMPLT);
+        put(&mut buf, 4, INIT_CMPLT_LEN as u32);
+        put(&mut buf, 8, 11);
+        put(&mut buf, 12, 0);
+        put(&mut buf, 32, 8);
+        put(&mut buf, 36, 23_700);
+
+        let expected = Message::InitComplete {
+            request_id: 11,
+            max_packets_per_transfer: 8,
+            max_transfer_size: 23_700,
+        };
+        assert_eq!(parse_init_cmplt(&buf).unwrap(), expected.clone());
+        assert_eq!(unwrap_messages(&buf).unwrap(), vec![expected.clone()]);
+
+        let mut padded = buf.clone();
+        padded.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(parse_init_cmplt(&padded).unwrap(), expected);
+
+        assert_eq!(
+            parse_init_cmplt(&buf[..INIT_CMPLT_LEN - 1]),
+            Err(RndisError::ShortBuffer)
+        );
+
+        put(&mut buf, 12, 0xC000_0001);
+        assert_eq!(parse_init_cmplt(&buf), Err(RndisError::Status(0xC000_0001)));
+    }
+
+    #[test]
+    fn query_cmplt_round_trips_a_mac() {
+        let mac = [0x10u8, 0x20, 0x30, 0x40, 0x50, 0x60];
+        // Offset 24 is from the request id at byte 8, so the MAC starts at byte 32.
+        let mut buf = vec![0u8; 38];
+        put(&mut buf, 0, MSG_QUERY_CMPLT);
+        put(&mut buf, 4, 38);
+        put(&mut buf, 8, 5);
+        put(&mut buf, 12, 0);
+        put(&mut buf, 16, 6);
+        put(&mut buf, 20, 24);
+        buf[32..38].copy_from_slice(&mac);
+
+        assert_eq!(
+            parse_query_cmplt(&buf).unwrap(),
+            Message::QueryComplete {
+                request_id: 5,
+                data: mac.to_vec(),
+            }
+        );
+        assert_eq!(
+            unwrap_messages(&buf).unwrap(),
+            vec![Message::QueryComplete {
+                request_id: 5,
+                data: mac.to_vec(),
+            }]
+        );
+
+        assert_eq!(
+            parse_query_cmplt(&buf[..QUERY_CMPLT_HEADER_LEN - 1]),
+            Err(RndisError::ShortBuffer)
+        );
+
+        put(&mut buf, 12, 0xC000_00BB);
+        assert_eq!(
+            parse_query_cmplt(&buf),
+            Err(RndisError::Status(0xC000_00BB))
+        );
+
+        put(&mut buf, 12, 0);
+        put(&mut buf, 20, 100);
+        assert_eq!(parse_query_cmplt(&buf), Err(RndisError::BadDataOffset));
+    }
+
+    #[test]
+    fn set_cmplt_requires_success_status() {
+        let mut buf = vec![0u8; SET_CMPLT_HEADER_LEN];
+        put(&mut buf, 0, MSG_SET_CMPLT);
+        put(&mut buf, 4, SET_CMPLT_HEADER_LEN as u32);
+        put(&mut buf, 8, 4);
+        put(&mut buf, 12, 0);
+
+        let expected = Message::SetComplete { request_id: 4 };
+        assert_eq!(parse_set_cmplt(&buf).unwrap(), expected);
+        assert_eq!(unwrap_messages(&buf).unwrap(), vec![expected]);
+
+        assert_eq!(
+            parse_set_cmplt(&buf[..SET_CMPLT_HEADER_LEN - 1]),
+            Err(RndisError::ShortBuffer)
+        );
+
+        put(&mut buf, 12, 1);
+        assert_eq!(parse_set_cmplt(&buf), Err(RndisError::Status(1)));
     }
 }
