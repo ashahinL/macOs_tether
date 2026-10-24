@@ -1,0 +1,23 @@
+build/
+build2/
+*.o
+*.dSYM/
+*.pkg
+.DS_Store
+
+# Agent/IDE context
+.qodo/
+.claude/
+.gemini/
+AGENT_CONTEXT.md
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Temporary files
+/tmp/
+*.log

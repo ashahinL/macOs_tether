@@ -1,0 +1,51 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install libusb
+        run: brew install libusb
+
+      - name: Build .pkg installer
+        run: make pkg
+
+      - name: Get version from tag
+        id: version
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: macOs_tether ${{ steps.version.outputs.tag }}
+          body: |
+            ## Installation
+
+            1. Download **macOs_tether-${{ steps.version.outputs.tag }}.pkg** below
+            2. Double-click to install
+            3. Open **macOs_tether** from Applications
+
+            No Homebrew, no Xcode, no Terminal required.
+            The daemon runs automatically. Plug in your Android phone with USB tethering enabled.
+
+            ### Uninstall
+            ```bash
+            sudo launchctl unload /Library/LaunchDaemons/com.ashahin.macostether.plist
+            sudo rm /Library/LaunchDaemons/com.ashahin.macostether.plist
+            rm -rf /Applications/macOs_tether.app
+            ```
+          files: build/macOs_tether-*.pkg
+          draft: false
+          prerelease: false
